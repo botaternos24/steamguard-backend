@@ -1,7 +1,8 @@
+import imaplib
+import email
+import re
+import os
 from flask import Flask, request, jsonify
-from imapclient import IMAPClient
-from email import message_from_bytes
-import re, json, os
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,68 +13,76 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 
 app = Flask(__name__)
 
-def load_keys():
-    with open("keys.json", "r") as f:
-        return json.load(f)
+def get_valid_keys():
+    keys = []
+    for name, value in os.environ.items():
+        if name.startswith("KEY_"):
+            keys.append(value)
+    return keys
 
-def save_keys(data):
-    with open("keys.json", "w") as f:
-        json.dump(data, f, indent=4)
+def delete_used_key(used_key):
+    # Environment variables cannot be deleted programmatically on Render Free plan.
+    # Instead we just ignore this part – or you can manually remove it inside Render if needed.
+    pass
 
 def get_latest_steam_code():
-    with IMAPClient(EMAIL_HOST) as client:
-        client.login(EMAIL_USER, EMAIL_PASS)
-        client.select_folder("INBOX")
 
-        messages = client.search(['FROM', 'noreply@steampowered.com', 'SUBJECT', 'Your Steam account: Access from new computer'])
+    mail = imaplib.IMAP4_SSL(EMAIL_HOST)
+    mail.login(EMAIL_USER, EMAIL_PASS)
+    mail.select("INBOX")
 
-        if not messages:
-            return None
+    status, data = mail.search(None, '(FROM "noreply@steampowered.com")')
 
-        latest_msg_id = messages[-1]
-        msg_data = client.fetch(latest_msg_id, ['RFC822'])
-
-        raw = msg_data[latest_msg_id][b'RFC822']
-        msg = message_from_bytes(raw)
-
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == "text/plain":
-                    body += part.get_payload(decode=True).decode()
-        else:
-            body = msg.get_payload(decode=True).decode()
-
-        # extract the 5 digit code
-        match = re.search(r"\b([A-Z0-9]{5})\b", body)
-        if match:
-            return match.group(1)
-
+    if status != "OK":
         return None
+
+    msg_ids = data[0].split()
+    if not msg_ids:
+        return None
+
+    latest_email_id = msg_ids[-1]
+
+    status, msg_data = mail.fetch(latest_email_id, "(RFC822)")
+    raw_email = msg_data[0][1]
+
+    msg = email.message_from_bytes(raw_email)
+
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            if ctype in ["text/plain", "text/html"]:
+                try:
+                    body += part.get_payload(decode=True).decode()
+                except:
+                    pass
+    else:
+        body = msg.get_payload(decode=True).decode()
+
+    match = re.search(r"\b([A-Z0-9]{5})\b", body)
+    if match:
+        return match.group(1)
+
+    return None
+
 
 @app.post("/getcode")
 def get_code():
     data = request.json
-    key = data.get("key")
+    key = data.get("key", "").strip()
 
-    keys_data = load_keys()
+    valid_keys = get_valid_keys()
 
-    if key not in keys_data["keys"]:
+    if key not in valid_keys:
         return jsonify({"error": "Invalid key"}), 400
-
-    if keys_data["keys"][key] == True:
-        return jsonify({"error": "Key already used"}), 400
 
     code = get_latest_steam_code()
 
     if not code:
         return jsonify({"error": "No Steam Guard email found"}), 404
 
-    # mark key as used
-    keys_data["keys"][key] = True
-    save_keys(keys_data)
-
     return jsonify({"code": code})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
