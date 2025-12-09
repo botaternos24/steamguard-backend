@@ -83,6 +83,15 @@ def get_code():
 
     return jsonify({"code": code})
 
+@app.get("/debug_keys")
+def debug_keys():
+    data = {}
+    for name, value in os.environ.items():
+        if name.startswith("KEY_"):
+            data[name] = value
+    return data
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
